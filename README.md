@@ -1,8 +1,8 @@
 # LibAFL-Learn
 一个中文版本的 LibAFL 笔记，主要内容是 LibAFL 原理相关的内容，同时也附加一些 LibAFL 使用方面的 tips ，方便查阅和参考。
-## 关于LibAFL- [LibAFL-Learn](#libafl-learn)
+[LibAFL-Learn](#libafl-learn)
 - [LibAFL-Learn](#libafl-learn)
-  - [关于LibAFL- LibAFL-Learn](#关于libafl--libafl-learn)
+  - [关于LibAFL](#关于libafl)
   - [如何导入 LibAFL 作为依赖库](#如何导入-libafl-作为依赖库)
   - [LibAFL 的基本功能](#libafl-的基本功能)
   - [InProcess Fuzz 的基本要素](#inprocess-fuzz-的基本要素)
@@ -20,7 +20,7 @@
     - [Mutator](#mutator)
     - [Stage](#stage)
   - [Fuzz 流程分析](#fuzz-流程分析)
-
+## 关于LibAFL
 [LibAFL](https://github.com/AFLplusplus/LibAFL) 是一个使用 rust 编写的 fuzz 库， 核心代码参考自著名的 fuzz 工具 [AFL](https://github.com/google/AFL) 以及其社区版本 [AFL++](https://github.com/AFLplusplus/AFLplusplus) 。将 LibAFL 整合到你的项目中，可以快速获得可定制的 fuzz 能力 。
 ## 如何导入 LibAFL 作为依赖库
 因为 LibAFL 是用 rust 开发的，所以你需要有一个 rust 项目才能导入 LibAFL (这里暂且不提 pylibafl )。如果你对 rust 完全不了解，请左转 [ Rust 语言圣经 ](https://course.rs/about-book.html) 。
