@@ -20,6 +20,19 @@
     - [Mutator](#mutator)
     - [Stage](#stage)
   - [Fuzz 流程分析](#fuzz-流程分析)
+  - [Mutators 介绍](#mutators-介绍)
+    - [BitFlipMutator](#bitflipmutator)
+    - [ByteFlipMutator](#byteflipmutator)
+    - [ByteIncMutator](#byteincmutator)
+    - [BytesDecMutator](#bytesdecmutator)
+    - [ByteNegMutator](#bytenegmutator)
+    - [ByteRandMutator](#byterandmutator)
+    - [Byte/Word/Dword/Qword AddMutator](#byteworddwordqword-addmutator)
+    - [Byte/Word/Dword InterestingMutator](#byteworddword-interestingmutator)
+    - [BytesDeleteMutator](#bytesdeletemutator)
+    - [BytesExpandMutator](#bytesexpandmutator)
+    - [BytesInsertMutator](#bytesinsertmutator)
+    - [BytesRandInsertMutator](#bytesrandinsertmutator)
 
 
 ## 关于LibAFL
@@ -171,14 +184,14 @@ fuzzer.fuzz_loop()
 Executor 负责将测试用例发送给 harness 运行。下面是一个简单的 executor
 ```rust
 // Create the executor for an in-process function with just one observer
-    let mut executor = InProcessExecutor::new(
-        &mut harness,
-        tuple_list!(observer),
-        &mut fuzzer,
-        &mut state,
-        &mut mgr,
-    )
-    .expect("Failed to create the Executor");
+let mut executor = InProcessExecutor::new(
+    &mut harness,
+    tuple_list!(observer),
+    &mut fuzzer,
+    &mut state,
+    &mut mgr,
+)
+.expect("Failed to create the Executor");
 ```
 
 ### Mutator
@@ -224,27 +237,27 @@ pub fn havoc_mutations() -> HavocMutationsType {
 ```
 StdScheduledMutator 是对这些 mutator 的进一步封装。当 StdScheduledMutator 的 `mutate` 方法被调用时，StdScheduledMutator 会在这些 mutator 中随机选择多次进行变异
 ```rust
-    /// New default implementation for mutate.
-    /// Implementations must forward mutate() to this method
-    fn scheduled_mutate(
-        &mut self,
-        state: &mut S,
-        input: &mut I,
-        stage_idx: i32,
-    ) -> Result<MutationResult, Error> {
-        let mut r = MutationResult::Skipped;
-        let num = self.iterations(state, input);
-        for _ in 0..num {
-            let idx = self.schedule(state, input);
-            let outcome = self
-                .mutations_mut()
-                .get_and_mutate(idx, state, input, stage_idx)?;
-            if outcome == MutationResult::Mutated {
-                r = MutationResult::Mutated;
-            }
+/// New default implementation for mutate.
+/// Implementations must forward mutate() to this method
+fn scheduled_mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut I,
+    stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    let mut r = MutationResult::Skipped;
+    let num = self.iterations(state, input);
+    for _ in 0..num {
+        let idx = self.schedule(state, input);
+        let outcome = self
+            .mutations_mut()
+            .get_and_mutate(idx, state, input, stage_idx)?;
+        if outcome == MutationResult::Mutated {
+            r = MutationResult::Mutated;
         }
-        Ok(r)
     }
+    Ok(r)
+}
 ```
 可以通过实现自己的 mutator 来决定变异方式
 
@@ -254,100 +267,443 @@ Stage 是对 mutator 的进一步封装。Stage 从 corpus 中获取语料，利
 ## Fuzz 流程分析
 这里我们分析一下 `fuzz_one` 方法的实现，这个方法表示进行一次 fuzz。它首先使用 scheduler 获取当前的 corpus id，然后交给 stage 处理
 ```rust
-    fn fuzz_one(
-        &mut self,
-        stages: &mut ST,
-        executor: &mut E,
-        state: &mut CS::State,
-        manager: &mut EM,
-    ) -> Result<CorpusId, Error> {
-        // Init timer for scheduler
-        #[cfg(feature = "introspection")]
-        state.introspection_monitor_mut().start_timer();
+fn fuzz_one(
+    &mut self,
+    stages: &mut ST,
+    executor: &mut E,
+    state: &mut CS::State,
+    manager: &mut EM,
+) -> Result<CorpusId, Error> {
+    // Init timer for scheduler
+    #[cfg(feature = "introspection")]
+    state.introspection_monitor_mut().start_timer();
 
-        // Get the next index from the scheduler
-        let idx = self.scheduler.next(state)?;
+    // Get the next index from the scheduler
+    let idx = self.scheduler.next(state)?;
 
-        // Mark the elapsed time for the scheduler
-        #[cfg(feature = "introspection")]
-        state.introspection_monitor_mut().mark_scheduler_time();
+    // Mark the elapsed time for the scheduler
+    #[cfg(feature = "introspection")]
+    state.introspection_monitor_mut().mark_scheduler_time();
 
-        // Mark the elapsed time for the scheduler
-        #[cfg(feature = "introspection")]
-        state.introspection_monitor_mut().reset_stage_index();
+    // Mark the elapsed time for the scheduler
+    #[cfg(feature = "introspection")]
+    state.introspection_monitor_mut().reset_stage_index();
 
-        // Execute all stages
-        stages.perform_all(self, executor, state, manager, idx)?;
+    // Execute all stages
+    stages.perform_all(self, executor, state, manager, idx)?;
 
-        // Init timer for manager
-        #[cfg(feature = "introspection")]
-        state.introspection_monitor_mut().start_timer();
+    // Init timer for manager
+    #[cfg(feature = "introspection")]
+    state.introspection_monitor_mut().start_timer();
 
-        // Execute the manager
-        manager.process(self, state, executor)?;
+    // Execute the manager
+    manager.process(self, state, executor)?;
 
-        // Mark the elapsed time for the manager
-        #[cfg(feature = "introspection")]
-        state.introspection_monitor_mut().mark_manager_time();
+    // Mark the elapsed time for the manager
+    #[cfg(feature = "introspection")]
+    state.introspection_monitor_mut().mark_manager_time();
 
-        Ok(idx)
-    }
+    Ok(idx)
+}
 ```
 在 stages 里面调用 `perform_all` 方法，先使用第一个 stage 运行获取、运行测试用例，然后调用第二个 stages 元组
 ```rust
 fn perform_all(
-        &mut self,
-        fuzzer: &mut Z,
-        executor: &mut E,
-        state: &mut Head::State,
-        manager: &mut EM,
-        corpus_idx: CorpusId,
-    ) -> Result<(), Error> {
-        // Perform the current stage
-        self.0
-            .perform(fuzzer, executor, state, manager, corpus_idx)?;
+    &mut self,
+    fuzzer: &mut Z,
+    executor: &mut E,
+    state: &mut Head::State,
+    manager: &mut EM,
+    corpus_idx: CorpusId,
+) -> Result<(), Error> {
+    // Perform the current stage
+    self.0
+        .perform(fuzzer, executor, state, manager, corpus_idx)?;
 
-        // Execute the remaining stages
-        self.1
-            .perform_all(fuzzer, executor, state, manager, corpus_idx)
-    }
+    // Execute the remaining stages
+    self.1
+        .perform_all(fuzzer, executor, state, manager, corpus_idx)
+}
 ```
 在里面继续调用到了 `perform_mutational` 方法，根据从 scheduler 获取的 corpus id，选择对应的语料，变异成测试用例，交给 executor 执行，重复随机次。
 ```rust
- /// Runs this (mutational) stage for the given testcase
-    #[allow(clippy::cast_possible_wrap)] // more than i32 stages on 32 bit system - highly unlikely...
-    fn perform_mutational(
-        &mut self,
-        fuzzer: &mut Z,
-        executor: &mut E,
-        state: &mut Z::State,
-        manager: &mut EM,
-        corpus_idx: CorpusId,
-    ) -> Result<(), Error> {
-        let num = self.iterations(state, corpus_idx)?;
+/// Runs this (mutational) stage for the given testcase
+#[allow(clippy::cast_possible_wrap)] // more than i32 stages on 32 bit system - highly unlikely...
+fn perform_mutational(
+    &mut self,
+    fuzzer: &mut Z,
+    executor: &mut E,
+    state: &mut Z::State,
+    manager: &mut EM,
+    corpus_idx: CorpusId,
+) -> Result<(), Error> {
+    let num = self.iterations(state, corpus_idx)?;
+
+    start_timer!(state);
+    let mut testcase = state.corpus().get(corpus_idx)?.borrow_mut();
+    let Ok(input) = I::try_transform_from(&mut testcase, state, corpus_idx) else { return Ok(()); };
+    drop(testcase);
+    mark_feature_time!(state, PerfFeature::GetInputFromCorpus);
+
+    for i in 0..num {
+        let mut input = input.clone();
 
         start_timer!(state);
-        let mut testcase = state.corpus().get(corpus_idx)?.borrow_mut();
-        let Ok(input) = I::try_transform_from(&mut testcase, state, corpus_idx) else { return Ok(()); };
-        drop(testcase);
-        mark_feature_time!(state, PerfFeature::GetInputFromCorpus);
+        self.mutator_mut().mutate(state, &mut input, i as i32)?;
+        mark_feature_time!(state, PerfFeature::Mutate);
 
-        for i in 0..num {
-            let mut input = input.clone();
+        // Time is measured directly the `evaluate_input` function
+        let (untransformed, post) = input.try_transform_into(state)?;
+        let (_, corpus_idx) = fuzzer.evaluate_input(state, executor, manager, untransformed)?;
 
-            start_timer!(state);
-            self.mutator_mut().mutate(state, &mut input, i as i32)?;
-            mark_feature_time!(state, PerfFeature::Mutate);
-
-            // Time is measured directly the `evaluate_input` function
-            let (untransformed, post) = input.try_transform_into(state)?;
-            let (_, corpus_idx) = fuzzer.evaluate_input(state, executor, manager, untransformed)?;
-
-            start_timer!(state);
-            self.mutator_mut().post_exec(state, i as i32, corpus_idx)?;
-            post.post_exec(state, i as i32, corpus_idx)?;
-            mark_feature_time!(state, PerfFeature::MutatePostExec);
-        }
-        Ok(())
+        start_timer!(state);
+        self.mutator_mut().post_exec(state, i as i32, corpus_idx)?;
+        post.post_exec(state, i as i32, corpus_idx)?;
+        mark_feature_time!(state, PerfFeature::MutatePostExec);
     }
+    Ok(())
+}
+```
+
+## Mutators 介绍
+LibAFL 内置了一些实现好的 mutator。在上面的 mutator 一节我们也列举出来了。下面介绍一下每个 mutator 具体的变异方式。
+### BitFlipMutator
+从 input 中随机选出一个字节，再随机选出一个比特，异或
+```rust
+fn mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut I,
+    _stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    if input.bytes().is_empty() {
+        Ok(MutationResult::Skipped)
+    } else {
+        let bit = 1 << state.rand_mut().choose(0..8);
+        let byte = state.rand_mut().choose(input.bytes_mut());
+        *byte ^= bit;
+        Ok(MutationResult::Mutated)
+    }
+}
+```
+
+### ByteFlipMutator
+从 input 中随机选出一个 byte，按位取反
+```rust
+fn mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut I,
+    _stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    if input.bytes().is_empty() {
+        Ok(MutationResult::Skipped)
+    } else {
+        *state.rand_mut().choose(input.bytes_mut()) ^= 0xff;
+        Ok(MutationResult::Mutated)
+    }
+}
+```
+
+### ByteIncMutator
+从 input 中随机选出一个字节，加一
+```rust
+fn mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut I,
+    _stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    if input.bytes().is_empty() {
+        Ok(MutationResult::Skipped)
+    } else {
+        let byte = state.rand_mut().choose(input.bytes_mut());
+        *byte = byte.wrapping_add(1);
+        Ok(MutationResult::Mutated)
+    }
+}
+```
+
+### BytesDecMutator
+从 input 中随机选出一个字节，减一
+```rust
+fn mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut I,
+    _stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    if input.bytes().is_empty() {
+        Ok(MutationResult::Skipped)
+    } else {
+        let byte = state.rand_mut().choose(input.bytes_mut());
+        *byte = byte.wrapping_sub(1);
+        Ok(MutationResult::Mutated)
+    }
+}
+```
+
+### ByteNegMutator
+从 input 中随机选出一个字节，先按位取反，然后加1
+```rust
+fn mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut I,
+    _stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    if input.bytes().is_empty() {
+        Ok(MutationResult::Skipped)
+    } else {
+        let byte = state.rand_mut().choose(input.bytes_mut());
+        *byte = (!(*byte)).wrapping_add(1);
+        Ok(MutationResult::Mutated)
+    }
+}
+```
+
+### ByteRandMutator
+从 input 中随机选出一个字节，然后使用一个 0-254 之间的随机值和它异或
+```rust
+fn mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut I,
+    _stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    if input.bytes().is_empty() {
+        Ok(MutationResult::Skipped)
+    } else {
+        let byte = state.rand_mut().choose(input.bytes_mut());
+        *byte ^= 1 + state.rand_mut().below(254) as u8;
+        Ok(MutationResult::Mutated)
+    }
+}
+```
+### Byte/Word/Dword/Qword AddMutator
+从 input 中随机选择一个目标大小的串 （Byte/Word/Dword/Qword），然后从下面四个操作里面随机选一个完成
+- 加上一个随机值
+- 减去一个随机值
+- 交换大小端，加上一个随机值，交换大小端
+- 交换大小端，减去一个随机值，交换大小端
+```rust
+fn mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut I,
+    _stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    if input.bytes().len() < size_of::<$size>() {
+        Ok(MutationResult::Skipped)
+    } else {
+        // choose a random window of bytes (windows overlap) and convert to $size
+        let (index, bytes) = state
+            .rand_mut()
+            .choose(input.bytes().windows(size_of::<$size>()).enumerate());
+        let val = <$size>::from_ne_bytes(bytes.try_into().unwrap());
+
+        // mutate
+        let num = 1 + state.rand_mut().below(ARITH_MAX) as $size;
+        let new_val = match state.rand_mut().below(4) {
+            0 => val.wrapping_add(num),
+            1 => val.wrapping_sub(num),
+            2 => val.swap_bytes().wrapping_add(num).swap_bytes(),
+            _ => val.swap_bytes().wrapping_sub(num).swap_bytes(),
+        };
+
+        // set bytes to mutated value
+        let new_bytes = &mut input.bytes_mut()[index..index + size_of::<$size>()];
+        new_bytes.copy_from_slice(&new_val.to_ne_bytes());
+        Ok(MutationResult::Mutated)
+    }
+}
+```
+实现用到了宏，`$size` 表示串的类型，可能是 `u8/u16/u3/u64`。这里 `ARITH_MAX` 是一个确定的值。
+```rust
+/// The max value that will be added or subtracted during add mutations
+pub const ARITH_MAX: u64 = 35;
+```
+
+### Byte/Word/Dword InterestingMutator
+从 input 中随机选择一个目标大小的串（Byte/Word/Dword），然后随机使用一个 interesting 的值按大端序或者是小端序替换
+```rust
+fn mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut I,
+    _stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    if input.bytes().len() < size_of::<$size>() {
+        Ok(MutationResult::Skipped)
+    } else {
+        let bytes = input.bytes_mut();
+        let upper_bound = (bytes.len() + 1 - size_of::<$size>()) as u64;
+        let idx = state.rand_mut().below(upper_bound) as usize;
+        let val = *state.rand_mut().choose(&$interesting) as $size;
+        let new_bytes = match state.rand_mut().choose(&[0, 1]) {
+            0 => val.to_be_bytes(),
+            _ => val.to_le_bytes(),
+        };
+        bytes[idx..idx + size_of::<$size>()].copy_from_slice(&new_bytes);
+        Ok(MutationResult::Mutated)
+    }
+}
+```
+实现用到了宏，`$size` 表示串的类型，可能是 `u8/u16/u32`。`$interesting` 表示 interesting 的值的数组
+```rust
+/// Interesting 8-bit values from AFL
+pub const INTERESTING_8: [i8; 9] = [-128, -1, 0, 1, 16, 32, 64, 100, 127];
+/// Interesting 16-bit values from AFL
+pub const INTERESTING_16: [i16; 19] = [
+    -128, -1, 0, 1, 16, 32, 64, 100, 127, -32768, -129, 128, 255, 256, 512, 1000, 1024, 4096, 32767,
+];
+/// Interesting 32-bit values from AFL
+pub const INTERESTING_32: [i32; 27] = [
+    -128,
+    -1,
+    0,
+    1,
+    16,
+    32,
+    64,
+    100,
+    127,
+    -32768,
+    -129,
+    128,
+    255,
+    256,
+    512,
+    1000,
+    1024,
+    4096,
+    32767,
+    -2147483648,
+    -100663046,
+    -32769,
+    32768,
+    65535,
+    65536,
+    100663045,
+    2147483647,
+];
+```
+
+### BytesDeleteMutator
+从 input 中删除随机长度的字节串
+```rust
+fn mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut I,
+    _stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    let size = input.bytes().len();
+    if size <= 2 {
+        return Ok(MutationResult::Skipped);
+    }
+
+    let range = rand_range(state, size, size);
+    if range.is_empty() {
+        return Ok(MutationResult::Skipped);
+    }
+
+    input.bytes_mut().drain(range);
+
+    Ok(MutationResult::Mutated)
+}
+```
+
+### BytesExpandMutator
+将 input 扩展 range 长度，然后从 range 的开始位置向前移动剩下的字节串，直到覆盖扩展的长度
+```rust
+fn mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut I,
+    _stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    let max_size = state.max_size();
+    let size = input.bytes().len();
+    if size == 0 || size >= max_size {
+        return Ok(MutationResult::Skipped);
+    }
+
+    let mut range = rand_range(state, size, min(max_size - size, 16));
+    if range.is_empty() {
+        return Ok(MutationResult::Skipped);
+    }
+    let new_size = range.len() + size;
+
+    let mut target = size;
+    core::mem::swap(&mut target, &mut range.end);
+
+    input.bytes_mut().resize(new_size, 0);
+    input.bytes_mut().copy_within(range, target);
+
+    Ok(MutationResult::Mutated)
+}
+```
+有点复杂举个例子，最后 `[2,3,4,5,6]` 被向前移动 3 格，覆盖 `[0,0,0]`  
+```
+input [0,1,2,3,4,5,6]
+range [2,4]
+resized input [0,1,2,3,4,5,6,0,0,0]
+result [0,1,2,3,4,2,3,4,5,6]
+```
+
+### BytesInsertMutator
+向 input 中随机位置插入随机长度重复值的字节串，重复值来自 input 中的随机字节
+```rust
+fn mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut I,
+    _stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    let max_size = state.max_size();
+    let size = input.bytes().len();
+    if size == 0 || size >= max_size {
+        return Ok(MutationResult::Skipped);
+    }
+
+    let amount = 1 + state.rand_mut().below(min(max_size - size, 16) as u64) as usize;
+    let offset = state.rand_mut().below(size as u64 + 1) as usize;
+
+    let val = input.bytes()[state.rand_mut().below(size as u64) as usize];
+
+    input
+        .bytes_mut()
+        .splice(offset..offset, core::iter::repeat(val).take(amount));
+
+    Ok(MutationResult::Mutated)
+}
+```
+
+### BytesRandInsertMutator
+向 input 中随机位置插入随机长度重复值的字节串，和 `BytesInsertMutator` 不同，重复值是随机的
+```rust
+fn mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut I,
+    _stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    let max_size = state.max_size();
+    let size = input.bytes().len();
+    if size >= max_size {
+        return Ok(MutationResult::Skipped);
+    }
+
+    let amount = 1 + state.rand_mut().below(min(max_size - size, 16) as u64) as usize;
+    let offset = state.rand_mut().below(size as u64 + 1) as usize;
+
+    let val = state.rand_mut().next() as u8;
+
+    input
+        .bytes_mut()
+        .splice(offset..offset, core::iter::repeat(val).take(amount));
+
+    Ok(MutationResult::Mutated)
+}
 ```
