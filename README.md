@@ -33,6 +33,13 @@
     - [BytesExpandMutator](#bytesexpandmutator)
     - [BytesInsertMutator](#bytesinsertmutator)
     - [BytesRandInsertMutator](#bytesrandinsertmutator)
+    - [BytesSetMutator](#bytessetmutator)
+    - [BytesRandSetMutator](#bytesrandsetmutator)
+    - [BytesCopyMutator](#bytescopymutator)
+    - [BytesInsertCopyMutator](#bytesinsertcopymutator)
+    - [BytesSwapMutator](#bytesswapmutator)
+    - [CrossoverInsertMutator](#crossoverinsertmutator)
+    - [CrossoverReplaceMutator](#crossoverreplacemutator)
 
 
 ## 关于LibAFL
@@ -706,4 +713,255 @@ fn mutate(
 
     Ok(MutationResult::Mutated)
 }
+```
+
+### BytesSetMutator
+从 input 中随机选择一个 range，替换为重复值的字节串，重复值来自 input
+```rust
+fn mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut I,
+    _stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    let size = input.bytes().len();
+    if size == 0 {
+        return Ok(MutationResult::Skipped);
+    }
+    let range = rand_range(state, size, min(size, 16));
+    if range.is_empty() {
+        return Ok(MutationResult::Skipped);
+    }
+
+    let val = *state.rand_mut().choose(input.bytes());
+    let quantity = range.len();
+    input
+        .bytes_mut()
+        .splice(range, core::iter::repeat(val).take(quantity));
+
+    Ok(MutationResult::Mutated)
+}
+```
+
+### BytesRandSetMutator
+从 input 中随机选择一个 range，替换为重复值的字节串，和 `BytesSetMutator` 不同的是，重复值是随机生成的
+```rust
+fn mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut I,
+    _stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    let size = input.bytes().len();
+    if size == 0 {
+        return Ok(MutationResult::Skipped);
+    }
+    let range = rand_range(state, size, min(size, 16));
+    if range.is_empty() {
+        return Ok(MutationResult::Skipped);
+    }
+
+    let val = state.rand_mut().next() as u8;
+    let quantity = range.len();
+    input
+        .bytes_mut()
+        .splice(range, core::iter::repeat(val).take(quantity));
+
+    Ok(MutationResult::Mutated)
+}
+```
+
+### BytesCopyMutator
+将 input 中的一段字节串拷贝到另一个位置
+```rust
+fn mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut I,
+    _stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    let size = input.bytes().len();
+    if size <= 1 {
+        return Ok(MutationResult::Skipped);
+    }
+
+    let target = state.rand_mut().below(size as u64) as usize;
+    let range = rand_range(state, size, size - target);
+
+    input.bytes_mut().copy_within(range, target);
+
+    Ok(MutationResult::Mutated)
+}
+```
+
+### BytesInsertCopyMutator
+从 input 中选出一个字节串，复制并且插入到 input 中
+```rust
+fn mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut I,
+    _stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    let size = input.bytes().len();
+    if size <= 1 || size == state.max_size() {
+        return Ok(MutationResult::Skipped);
+    }
+
+    let target = state.rand_mut().below(size as u64) as usize;
+    // make sure that the sampled range is both in bounds and of an acceptable size
+    let max_insert_len = min(size - target, state.max_size() - size);
+    let range = rand_range(state, size, max_insert_len);
+
+    self.tmp_buf.clear();
+    self.tmp_buf.extend(input.bytes()[range].iter().copied());
+
+    input
+        .bytes_mut()
+        .splice(target..target, self.tmp_buf.drain(..));
+
+    Ok(MutationResult::Mutated)
+}
+```
+
+### BytesSwapMutator
+从 input 中选择两个不相交的字节串，交换
+```rust
+fn mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut I,
+    _stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    let size = input.bytes().len();
+    if size <= 1 {
+        return Ok(MutationResult::Skipped);
+    }
+
+    self.tmp_buf.clear();
+
+    let first = rand_range(state, size, size);
+    if state.rand_mut().next() & 1 == 0 && first.start != 0 {
+        let second = rand_range(state, first.start, first.start);
+        self.tmp_buf.extend(input.bytes_mut().drain(first.clone()));
+        self.tmp_buf
+            .extend(input.bytes()[second.clone()].iter().copied());
+        input
+            .bytes_mut()
+            .splice(first.start..first.start, self.tmp_buf.drain(first.len()..));
+        input.bytes_mut().splice(second, self.tmp_buf.drain(..));
+        Ok(MutationResult::Mutated)
+    } else if first.end != size {
+        let mut second = rand_range(state, size - first.end, size - first.end);
+        second.start += first.end;
+        second.end += first.end;
+        self.tmp_buf.extend(input.bytes_mut().drain(second.clone()));
+        self.tmp_buf
+            .extend(input.bytes()[first.clone()].iter().copied());
+        input.bytes_mut().splice(
+            second.start..second.start,
+            self.tmp_buf.drain(second.len()..),
+        );
+        input.bytes_mut().splice(first, self.tmp_buf.drain(..));
+        Ok(MutationResult::Mutated)
+    } else {
+        Ok(MutationResult::Skipped)
+    }
+```
+
+### CrossoverInsertMutator
+从 corpus 中随机选出一个字节串插入到 input 中
+```rust
+fn mutate(
+    &mut self,
+    state: &mut S,
+    input: &mut S::Input,
+    _stage_idx: i32,
+) -> Result<MutationResult, Error> {
+    let size = input.bytes().len();
+    let max_size = state.max_size();
+    if size >= max_size {
+        return Ok(MutationResult::Skipped);
+    }
+
+    // We don't want to use the testcase we're already using for splicing
+    let idx = random_corpus_id!(state.corpus(), state.rand_mut());
+
+    if let Some(cur) = state.corpus().current() {
+        if idx == *cur {
+            return Ok(MutationResult::Skipped);
+        }
+    }
+
+    let other_size = state
+        .corpus()
+        .get(idx)?
+        .borrow_mut()
+        .load_input()?
+        .bytes()
+        .len();
+    if other_size < 2 {
+        return Ok(MutationResult::Skipped);
+    }
+
+    let range = rand_range(state, other_size, min(other_size, max_size - size));
+    let target = state.rand_mut().below(size as u64) as usize;
+
+    let mut other_testcase = state.corpus().get(idx)?.borrow_mut();
+    let other = other_testcase.load_input()?;
+
+    input
+        .bytes_mut()
+        .splice(target..target, other.bytes()[range].iter().copied());
+
+    Ok(MutationResult::Mutated)
+}
+```
+
+### CrossoverReplaceMutator
+从 corpus 中随机选择一个字节串替换 input 中的一个字节串
+```rust
+    fn mutate(
+        &mut self,
+        state: &mut S,
+        input: &mut S::Input,
+        _stage_idx: i32,
+    ) -> Result<MutationResult, Error> {
+        let size = input.bytes().len();
+        if size == 0 {
+            return Ok(MutationResult::Skipped);
+        }
+
+        // We don't want to use the testcase we're already using for splicing
+        let idx = random_corpus_id!(state.corpus(), state.rand_mut());
+        if let Some(cur) = state.corpus().current() {
+            if idx == *cur {
+                return Ok(MutationResult::Skipped);
+            }
+        }
+
+        let other_size = state
+            .corpus()
+            .get(idx)?
+            .borrow_mut()
+            .load_input()?
+            .bytes()
+            .len();
+        if other_size < 2 {
+            return Ok(MutationResult::Skipped);
+        }
+
+        let target = state.rand_mut().below(size as u64) as usize;
+        let range = rand_range(state, other_size, min(other_size, size - target));
+
+        let mut other_testcase = state.corpus().get(idx)?.borrow_mut();
+        let other = other_testcase.load_input()?;
+
+        input.bytes_mut().splice(
+            target..(target + range.len()),
+            other.bytes()[range].iter().copied(),
+        );
+
+        Ok(MutationResult::Mutated)
+    }
 ```
