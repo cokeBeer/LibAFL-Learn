@@ -272,7 +272,7 @@ fn scheduled_mutate(
 Stage 是对 mutator 的进一步封装。Stage 从 corpus 中获取语料，利用 mutator 进行变异，然后交给 executor 。
 
 ## Fuzz 流程分析
-这里我们分析一下 `fuzz_one` 方法的实现，这个方法表示进行一次 fuzz。它首先使用 scheduler 获取当前的 corpus id，然后交给 stage 处理
+这里我们分析一下 `fuzz_one` 方法的实现，这个方法表示进行一次 fuzz。它首先使用 scheduler 的 `next` 方法获取当前的 corpus id，然后交给 stage 处理
 ```rust
 fn fuzz_one(
     &mut self,
@@ -332,7 +332,25 @@ fn perform_all(
         .perform_all(fuzzer, executor, state, manager, corpus_idx)
 }
 ```
-在里面继续调用到了 `perform_mutational` 方法，根据从 scheduler 获取的 corpus id，选择对应的语料，变异成测试用例，交给 executor 执行，重复随机次。
+`perform` 方法如下 
+```rust
+    fn perform(
+        &mut self,
+        fuzzer: &mut Z,
+        executor: &mut E,
+        state: &mut Z::State,
+        manager: &mut EM,
+        corpus_idx: CorpusId,
+    ) -> Result<(), Error> {
+        let ret = self.perform_mutational(fuzzer, executor, state, manager, corpus_idx);
+
+        #[cfg(feature = "introspection")]
+        state.introspection_monitor_mut().finish_stage();
+
+        ret
+    }
+```
+在里面继续调用到了 `perform_mutational` 方法，这里根据 corpus_idx 从 state 中获取指定的 testcase
 ```rust
 /// Runs this (mutational) stage for the given testcase
 #[allow(clippy::cast_possible_wrap)] // more than i32 stages on 32 bit system - highly unlikely...
@@ -371,6 +389,211 @@ fn perform_mutational(
     Ok(())
 }
 ```
+里面调用 `evaluate_input` 
+```rust
+    fn evaluate_input(
+        &mut self,
+        state: &mut Self::State,
+        executor: &mut E,
+        manager: &mut EM,
+        input: <Self::State as UsesInput>::Input,
+    ) -> Result<(ExecuteInputResult, Option<CorpusId>), Error> {
+        self.evaluate_input_events(state, executor, manager, input, true)
+    }
+```
+再调用 `evaluate_input_events`
+```rust
+    fn evaluate_input_events(
+        &mut self,
+        state: &mut CS::State,
+        executor: &mut E,
+        manager: &mut EM,
+        input: <CS::State as UsesInput>::Input,
+        send_events: bool,
+    ) -> Result<(ExecuteInputResult, Option<CorpusId>), Error> {
+        self.evaluate_input_with_observers(state, executor, manager, input, send_events)
+    }
+```
+再调用 `evaluate_input_with_observers`，这里分成两段，首先调用 `execute_input` 把 testcase 喂给闭包函数，然后调用 `process_execution` 获取反馈信息
+```rust
+    fn evaluate_input_with_observers<E, EM>(
+        &mut self,
+        state: &mut Self::State,
+        executor: &mut E,
+        manager: &mut EM,
+        input: <Self::State as UsesInput>::Input,
+        send_events: bool,
+    ) -> Result<(ExecuteInputResult, Option<CorpusId>), Error>
+    where
+        E: Executor<EM, Self> + HasObservers<Observers = OT, State = Self::State>,
+        EM: EventFirer<State = Self::State>,
+    {
+        let exit_kind = self.execute_input(state, executor, manager, &input)?;
+        let observers = executor.observers();
+        self.process_execution(state, manager, input, observers, &exit_kind, send_events)
+    }
+```
+第一段，`execute_input` 里面会调用 `run_target`
+```rust
+    /// Runs the input and triggers observers and feedback
+    pub fn execute_input<E, EM>(
+        &mut self,
+        state: &mut CS::State,
+        executor: &mut E,
+        event_mgr: &mut EM,
+        input: &<CS::State as UsesInput>::Input,
+    ) -> Result<ExitKind, Error>
+    where
+        E: Executor<EM, Self> + HasObservers<Observers = OT, State = CS::State>,
+        EM: UsesState<State = CS::State>,
+        OT: ObserversTuple<CS::State>,
+    {
+        start_timer!(state);
+        executor.observers_mut().pre_exec_all(state, input)?;
+        mark_feature_time!(state, PerfFeature::PreExecObservers);
+
+        *state.executions_mut() += 1;
+
+        start_timer!(state);
+        let exit_kind = executor.run_target(self, state, event_mgr, input)?;
+        mark_feature_time!(state, PerfFeature::TargetExecution);
+
+        start_timer!(state);
+        executor
+            .observers_mut()
+            .post_exec_all(state, input, &exit_kind)?;
+        mark_feature_time!(state, PerfFeature::PostExecObservers);
+
+        Ok(exit_kind)
+    }
+```
+`run_target` 里实际就是调用之前的闭包函数 `harness_fn`，执行我们自定义的逻辑
+```rust
+    fn run_target(
+        &mut self,
+        fuzzer: &mut Z,
+        state: &mut Self::State,
+        mgr: &mut EM,
+        input: &Self::Input,
+    ) -> Result<ExitKind, Error> {
+        self.handlers
+            .pre_run_target(self, fuzzer, state, mgr, input);
+
+        let ret = (self.harness_fn.borrow_mut())(input);
+
+        self.handlers.post_run_target();
+        Ok(ret)
+    }
+```
+第二段，`process_execution` 获取反馈信息，可以看到这里通过 objective 判断当前的 testcase 是否是 solution，通过 feedback 判断当前的 testcase 是否是 interesting 的，最后在 match 块内根据结果进行相应操作
+```rust
+    /// Evaluate if a set of observation channels has an interesting state
+    fn process_execution<EM>(
+        &mut self,
+        state: &mut CS::State,
+        manager: &mut EM,
+        input: <CS::State as UsesInput>::Input,
+        observers: &OT,
+        exit_kind: &ExitKind,
+        send_events: bool,
+    ) -> Result<(ExecuteInputResult, Option<CorpusId>), Error>
+    where
+        EM: EventFirer<State = Self::State>,
+    {
+        let mut res = ExecuteInputResult::None;
+
+        #[cfg(not(feature = "introspection"))]
+        let is_solution = self
+            .objective_mut()
+            .is_interesting(state, manager, &input, observers, exit_kind)?;
+
+        #[cfg(feature = "introspection")]
+        let is_solution = self
+            .objective_mut()
+            .is_interesting_introspection(state, manager, &input, observers, exit_kind)?;
+
+        if is_solution {
+            res = ExecuteInputResult::Solution;
+        } else {
+            #[cfg(not(feature = "introspection"))]
+            let is_corpus = self
+                .feedback_mut()
+                .is_interesting(state, manager, &input, observers, exit_kind)?;
+
+            #[cfg(feature = "introspection")]
+            let is_corpus = self
+                .feedback_mut()
+                .is_interesting_introspection(state, manager, &input, observers, exit_kind)?;
+
+            if is_corpus {
+                res = ExecuteInputResult::Corpus;
+            }
+        }
+
+        match res {
+            ExecuteInputResult::None => {
+                self.feedback_mut().discard_metadata(state, &input)?;
+                self.objective_mut().discard_metadata(state, &input)?;
+                Ok((res, None))
+            }
+            ExecuteInputResult::Corpus => {
+                // Not a solution
+                self.objective_mut().discard_metadata(state, &input)?;
+
+                // Add the input to the main corpus
+                let mut testcase = Testcase::with_executions(input.clone(), *state.executions());
+                self.feedback_mut()
+                    .append_metadata(state, observers, &mut testcase)?;
+                let idx = state.corpus_mut().add(testcase)?;
+                self.scheduler_mut().on_add(state, idx)?;
+
+                if send_events {
+                    // TODO set None for fast targets
+                    let observers_buf = if manager.configuration() == EventConfig::AlwaysUnique {
+                        None
+                    } else {
+                        Some(manager.serialize_observers::<OT>(observers)?)
+                    };
+                    manager.fire(
+                        state,
+                        Event::NewTestcase {
+                            input,
+                            observers_buf,
+                            exit_kind: *exit_kind,
+                            corpus_size: state.corpus().count(),
+                            client_config: manager.configuration(),
+                            time: current_time(),
+                            executions: *state.executions(),
+                        },
+                    )?;
+                }
+                Ok((res, Some(idx)))
+            }
+            ExecuteInputResult::Solution => {
+                // Not interesting
+                self.feedback_mut().discard_metadata(state, &input)?;
+
+                // The input is a solution, add it to the respective corpus
+                let mut testcase = Testcase::with_executions(input, *state.executions());
+                self.objective_mut()
+                    .append_metadata(state, observers, &mut testcase)?;
+                state.solutions_mut().add(testcase)?;
+
+                if send_events {
+                    manager.fire(
+                        state,
+                        Event::Objective {
+                            objective_size: state.solutions().count(),
+                        },
+                    )?;
+                }
+
+                Ok((res, None))
+            }
+        }
+    }
+```
+至此， fuzzer 完成了调度 testcase，执行 testcase，判断 testcase 是否是 solution 或者是 interesting，添加新的 corpus 和 crashes 的闭环。
 
 ## Mutators 介绍
 LibAFL 内置了一些实现好的 mutator。在上面的 mutator 一节我们也列举出来了。下面介绍一下每个 mutator 具体的变异方式。
